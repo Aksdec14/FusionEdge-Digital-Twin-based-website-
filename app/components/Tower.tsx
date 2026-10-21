@@ -1,334 +1,280 @@
-import * as THREE from 'three'
+// Isometric digital-twin scene: city -> tower -> floor-by-floor split -> floor plan
+// -> workspace / lift / meeting-room faults with raised tickets.
+// Framework-agnostic: createTower(host) builds everything inside `host` and returns update(progress 0..1).
+// `host` must be a positioned element (absolute/relative) that you size and place yourself.
 
-// Module labels that appear on the building facade
+// ───────────────────────── DATA (edit these) ─────────────────────────
 export const LABELS = ['Visitor Management', 'Help Desk', 'Attendance', 'Asset AMC', 'Digital Checklist', 'Space Mapping', 'Asset Health']
+// floor each label points at on the tower facade
+export const FACADE_FLOORS = [6, 9, 12, 15, 18, 20, 23]
 export const FLOOR_TAG = 'Common Area Management'
-// Each critical asset gets the same treatment as the AC: a close-up and its own detail card.
-export const ASSETS: { title: string; floor: number; x: number; z: number; y: number; rows: [string, string][] }[] = [
-  { title: 'Split AC · Floor 18', floor: 18, x: -3, z: -8, y: 1.2, rows: [['Cooling', '18 °C · 92% efficiency'], ['Electricity used', '4.2 kWh today'], ['Panel', 'Working'], ['PPM', 'Due in 6 days'], ['Tickets raised', '2 open']] },
-  { title: 'Passenger lift · Floor 8', floor: 8, x: -5, z: -5, y: 1.6, rows: [['Status', 'Working'], ['Trips today', '146'], ['Door', 'Closing normally'], ['PPM', 'Due in 12 days'], ['Tickets raised', 'None']] },
-  { title: 'Main panel · Floor 14', floor: 14, x: 1, z: -6, y: 1.3, rows: [['Load', '64% of capacity'], ['Voltage', '415 V'], ['Breakers', 'All closed'], ['PPM', 'Due in 18 days'], ['Tickets raised', 'None']] },
+
+// floor plan rooms: [x, y, w, h, label, color]  (plan canvas is 560 x 560)
+export const ROOMS: [number, number, number, number, string, string][] = [
+  [40, 40, 240, 150, 'Open workspace', '#bcd3dd'], [40, 190, 160, 210, 'Open workspace', '#bcd3dd'],
+  [290, 40, 75, 90, 'Meeting', '#f1c9b0'], [365, 40, 75, 90, 'Meeting', '#f1c9b0'], [440, 40, 80, 90, 'Meeting', '#f1c9b0'],
+  [370, 140, 150, 115, 'Boardroom', '#e8a47d'], [370, 265, 150, 125, 'Pantry', '#d9d29a'],
+  [210, 200, 70, 70, 'Lifts', '#aab4ba'], [280, 200, 70, 70, 'Stairs', '#aab4ba'], [210, 270, 140, 70, 'Restrooms', '#c2c9cd'],
+  [210, 345, 140, 60, 'Hot desks', '#bcd3dd'], [40, 410, 160, 110, 'Focus booths', '#c9bfdc'],
+  [210, 410, 150, 110, 'Lobby', '#d8dcdf'], [370, 400, 150, 120, 'Lounge', '#b9d6b5'],
 ]
-// facade anchors on the hero tower's +x face: [floor, z]
-const FAC: [number, number][] = [[6, -9], [9, 1], [12, -12], [15, -4], [18, -10], [20, 1], [23, -6]]
+// room indexes used by the zoom steps
+const R_WORKSPACE = 0, R_MEETING = [2, 3, 4], R_LIFT_CORE = [7, 8, 9]
 
-const FH = 3.4, NF = 26, PF = 5, FM = 20, SEL = 11
-const SPLIT = 0.3 // extra gap added between floors in the exploded view
-const PURPLE = 0x5d1f72, LILAC = 0xc9a9d8
+// asset marker: x,y on the plan; bad = not working; box = [x, y, width] of the ticket tag
+export interface Issue { x: number; y: number; bad: boolean; box?: [number, number, number]; l1: string; l2?: string }
+export const WORKSPACE_ISSUES: Issue[] = [
+  { x: 58, y: 56, bad: true, box: [68, 46, 100], l1: 'Split AC · not cooling', l2: '2 tickets raised' },
+  { x: 182, y: 56, bad: true, box: [190, 46, 84], l1: 'Printer · paper jam', l2: '1 ticket raised' },
+  { x: 204, y: 151, bad: true, box: [178, 166, 94], l1: 'Workstation 07 · no power', l2: '1 ticket raised' },
+  { x: 58, y: 172, bad: false, l1: 'Main panel · working' },
+]
+export const LIFT_ISSUE: Issue = { x: 255, y: 231, bad: true, box: [214, 284, 132], l1: 'Lift 2 · not working', l2: '1 ticket raised' }
+export const LIFT_OK = { x: 229, y: 231, label: 'Lift 1 · working' }
+export const MEETING_ISSUE: Issue = { x: 402, y: 100, bad: true, box: [352, 148, 150], l1: 'Meeting room 2 · chair broken', l2: '1 ticket raised' }
 
-const S = (a: number, b: number, x: number) => {
-  const t = Math.min(1, Math.max(0, (x - a) / (b - a)))
-  return t * t * (3 - 2 * t)
+export const PLAN_TAGS = { plan: FLOOR_TAG, workspace: 'Open workspace · Floor 12', lift: 'Lift lobby · Floor 12', meeting: 'Meeting rooms · Floor 12' }
+
+// ───────────────────────── helpers ─────────────────────────
+const NS = 'http://www.w3.org/2000/svg'
+type Pt = [number, number]
+const K = 0.866
+const P = (x: number, y: number, z: number): Pt => [(x - y) * K, (x + y) * 0.5 - z]
+const pts = (a: Pt[]) => a.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')
+const sm = (a: number, b: number, p: number) => { const t = Math.min(1, Math.max(0, (p - a) / (b - a))); return t * t * (3 - 2 * t) }
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t
+function el(n: string, a: Record<string, string | number>, par: Element) {
+  const e = document.createElementNS(NS, n)
+  for (const k in a) e.setAttribute(k, String(a[k]))
+  par.appendChild(e)
+  return e as SVGElement
 }
-const KF = (p: number, k: number[][]) => {
-  if (p <= k[0][0]) return k[0][1]
-  for (let i = 1; i < k.length; i++) if (p <= k[i][0]) return k[i - 1][1] + (k[i][1] - k[i - 1][1]) * S(k[i - 1][0], k[i][0], p)
-  return k[k.length - 1][1]
-}
 
-export interface Ui {
-  labels: HTMLElement[]
-  lines: SVGPolylineElement[]
-  dots: SVGCircleElement[]
-  floorTag: HTMLElement
-  cards: HTMLElement[]
-}
+const FH = 5, GAP = 9, NF = 26, FOC = 12, PITCH = 50
+type Col = [string, string, string, string] // top, left, right, stroke
+const GREY: Col = ['#f3f4f5', '#d8dbde', '#c3c7ca', '#8e969c']
+const GLASS: Col = ['#e2d3ec', '#b79ccb', '#9a78b3', '#6f4a88']
+const BAD = '#d64545', OK = '#2e9d5b'
 
-export function createTower(host: HTMLElement, ui: Ui) {
-  let seed = 11
-  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647
+const CSS = `
+.tw-host{overflow:hidden;background:#fff;--tw-ink:#1d2a31;--tw-line:#9aa3a9;--tw-panel:#f6f7f8;--tw-bg:#fff;--tw-accent:#5d1f72;font-family:inherit}
+.tw-scene{position:absolute;inset:0;width:100%;height:100%}
+.tw-lab{position:absolute;left:0;top:0;white-space:nowrap;z-index:3;pointer-events:none;opacity:0}
+.tw-lab i{position:absolute;left:-4px;top:-4px;width:8px;height:8px;border-radius:50%;background:var(--tw-accent)}
+.tw-lab span{position:absolute;top:0;left:14px;transform:translateY(-50%);background:var(--tw-panel);color:var(--tw-ink);padding:3px 8px;border-radius:4px;font-size:14px;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.tw-lab.tw-l span{left:auto;right:14px}
+.tw-tag{position:absolute;top:clamp(16px,7%,64px);left:50%;transform:translateX(-50%);background:var(--tw-accent);color:#fff;padding:6px 16px;border-radius:999px;font-weight:600;font-size:15px;opacity:0;z-index:3;white-space:nowrap;pointer-events:none}
+.tw-plan{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:clamp(16px,4%,56px);padding:24px;opacity:0;pointer-events:none;z-index:2}
+.tw-plan svg{width:min(560px,92%,calc(var(--tw-h,800px) * .8));height:auto;flex:none}
+.tw-legend{list-style:none;margin:0;padding:0;width:210px;font-size:15px;display:none;color:var(--tw-ink)}
+.tw-wide .tw-legend{display:block}
+.tw-legend li{display:flex;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--tw-line)}
+.tw-legend b{width:14px;height:14px;border-radius:3px;flex:none}
+.tw-room{opacity:0}
+.tw-room text{font-size:13px;fill:var(--tw-ink);text-anchor:middle;font-family:inherit;font-weight:600}
+`
 
-  const scene = new THREE.Scene()
-  const cam = new THREE.PerspectiveCamera(38, 1, 0.1, 600)
-  const rend = new THREE.WebGLRenderer({ antialias: true, alpha: true })
-  rend.setClearColor(0x000000, 0)
-  rend.shadowMap.enabled = true
-  rend.toneMapping = THREE.ACESFilmicToneMapping
-  rend.toneMappingExposure = 1.15
-  rend.outputColorSpace = THREE.SRGBColorSpace
-  rend.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-  host.appendChild(rend.domElement)
+// ───────────────────────── scene ─────────────────────────
+export function createTower(host: HTMLElement, getTop: () => number = () => 0) {
+  let seed = 7
+  const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280 }
 
-  // lighting + soft sky reflections
-  scene.add(new THREE.HemisphereLight(0xffffff, 0xc8cad2, 1.4))
-  {
-    const sky = new THREE.Scene()
-    const sg = new THREE.SphereGeometry(50, 24, 16)
-    const pa = sg.attributes.position, cs: number[] = []
-    for (let i = 0; i < pa.count; i++) { const y = (pa.getY(i) / 50 + 1) / 2; cs.push(0.5 + 0.5 * y, 0.6 + 0.4 * y, 0.75 + 0.25 * y) }
-    sg.setAttribute('color', new THREE.Float32BufferAttribute(cs, 3))
-    sky.add(new THREE.Mesh(sg, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide })))
-    const panel = new THREE.Mesh(new THREE.PlaneGeometry(40, 25), new THREE.MeshBasicMaterial({ color: 0xffffff }))
-    panel.material.color.multiplyScalar(6)
-    panel.position.set(25, 35, 25); panel.lookAt(0, 0, 0); sky.add(panel)
-    const pg = new THREE.PMREMGenerator(rend)
-    scene.environment = pg.fromScene(sky, 0.02).texture
-    pg.dispose()
+  const style = document.createElement('style'); style.textContent = CSS; document.head.appendChild(style)
+  host.classList.add('tw-host')
+  const svg = document.createElementNS(NS, 'svg'); svg.setAttribute('class', 'tw-scene'); host.appendChild(svg)
+
+  const box = (g: Element, x: number, y: number, w: number, d: number, h: number, z: number, c: Col, sw = 0.6) => {
+    el('polygon', { points: pts([P(x, y + d, z), P(x + w, y + d, z), P(x + w, y + d, z + h), P(x, y + d, z + h)]), fill: c[1], stroke: c[3], 'stroke-width': sw }, g)
+    el('polygon', { points: pts([P(x + w, y, z), P(x + w, y + d, z), P(x + w, y + d, z + h), P(x + w, y, z + h)]), fill: c[2], stroke: c[3], 'stroke-width': sw }, g)
+    el('polygon', { points: pts([P(x, y, z + h), P(x + w, y, z + h), P(x + w, y + d, z + h), P(x, y + d, z + h)]), fill: c[0], stroke: c[3], 'stroke-width': sw }, g)
   }
-  const sun = new THREE.DirectionalLight(0xfff4e6, 4.5)
-  sun.position.set(60, 120, 70); sun.castShadow = true; sun.shadow.mapSize.set(4096, 4096)
-  Object.assign(sun.shadow.camera, { left: -150, right: 150, top: 160, bottom: -110, near: 1, far: 420 })
-  sun.shadow.bias = -0.0004
-  scene.add(sun)
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(500, 500), new THREE.ShadowMaterial({ opacity: 0.2 }))
-  ground.rotation.x = -Math.PI / 2; ground.position.y = -1.06; ground.receiveShadow = true; scene.add(ground)
-  const plinth = new THREE.Mesh(new THREE.BoxGeometry(190, 1, 130), new THREE.MeshStandardMaterial({ color: 0xe6e8ee, roughness: 0.6 }))
-  plinth.position.set(-6, -0.55, -8); plinth.receiveShadow = true; scene.add(plinth)
-
-  // footprints: podium (rounded corner), main tower, set-back top tower
-  const ps = new THREE.Shape()
-  ps.moveTo(-16, 14); ps.lineTo(20, 14); ps.lineTo(20, -6); ps.quadraticCurveTo(20, -12, 14, -12); ps.lineTo(-16, -12); ps.closePath()
-  const podPts = ps.getSpacedPoints(150).map((p) => [p.x, -p.y])
-  const rect = (x0: number, x1: number, z0: number, z1: number, st: number) => {
-    const a: number[][] = []
-    for (let x = x0; x <= x1; x += st) a.push([x, z0], [x, z1])
-    for (let z = z0; z <= z1; z += st) a.push([x0, z], [x1, z])
-    return a
-  }
-  const towPts = rect(-16, 6, -14, 4, 0.6), topPts = rect(-9, 6, -12, 2, 0.6)
-  const podG = new THREE.ExtrudeGeometry(ps, { depth: 0.45, bevelEnabled: false }); podG.rotateX(-Math.PI / 2)
-  const towG = new THREE.BoxGeometry(22.8, 0.4, 18.8); towG.translate(-5, 0.2, -5)
-  const topG = new THREE.BoxGeometry(15.8, 0.4, 14.8); topG.translate(-1.5, 0.2, -5)
-  const postG = new THREE.BoxGeometry(0.11, 1, 0.11)
-  const postBase = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4, metalness: 0.25, transparent: true })
-
-  const groups: THREE.Group[] = [], slabMats: THREE.MeshStandardMaterial[] = [], postMats: THREE.MeshStandardMaterial[] = [], glassMats: THREE.MeshPhysicalMaterial[] = []
-  for (let f = 0; f < NF; f++) {
-    const g = new THREE.Group(), pod = f < PF
-    const mat = new THREE.MeshStandardMaterial({ color: 0xf4f4f4, roughness: 0.7, transparent: true }); slabMats.push(mat)
-    const slab = new THREE.Mesh(pod ? podG : f < FM ? towG : topG, mat)
-    slab.position.y = f * FH; slab.castShadow = slab.receiveShadow = true; g.add(slab)
-    if (f === PF || f === FM) { const r = new THREE.Mesh(f === PF ? podG : towG, mat); r.position.y = f * FH; g.add(r) }
-    if (f === NF - 1) {
-      const cap = new THREE.Mesh(new THREE.BoxGeometry(17, 0.9, 16), mat); cap.position.set(-1.5, (f + 1) * FH + 0.5, -5); cap.castShadow = true; g.add(cap)
-      for (const q of [[-4, 2, 4, 2.2, 3], [2, -3, 3, 1.6, 3], [-6, -1, 2, 1, 2]]) {
-        const b = new THREE.Mesh(new THREE.BoxGeometry(q[2], q[3], q[4]), mat); b.position.set(q[0], (f + 1) * FH + 1 + q[3] / 2, q[1] - 5); b.castShadow = true; g.add(b)
+  // grey context buildings: visible, non-glowing windows
+  const greyWindows = (g: Element, x: number, y: number, w: number, d: number, h: number) => {
+    const rows = Math.floor((h - 3) / FH), n = Math.max(3, Math.round(w / 7)), a = (w - 3) / n, b = (d - 3) / n
+    for (let r = 0; r < rows; r++) {
+      const z0 = r * FH + 1.5, z1 = z0 + 2.8
+      for (let i = 0; i < n; i++) {
+        const yy = y + 1.5 + i * b, xx = x + 1.5 + i * a
+        el('polygon', { points: pts([P(x + w, yy, z0), P(x + w, yy + b - 1.2, z0), P(x + w, yy + b - 1.2, z1), P(x + w, yy, z1)]), fill: '#9aa4ad' }, g)
+        el('polygon', { points: pts([P(xx, y + d, z0), P(xx + a - 1.2, y + d, z0), P(xx + a - 1.2, y + d, z1), P(xx, y + d, z1)]), fill: '#aab3bb' }, g)
       }
     }
-    const src = pod ? podPts : f < FM ? towPts : topPts
-    const keep = src.filter((_, i) => { if (f === 0 && i % 3) return false; if (f >= 2 && f < PF && i % 2) return false; return rnd() > 0.03 })
-    const pm = postBase.clone(); postMats.push(pm)
-    const im = new THREE.InstancedMesh(postG, pm, keep.length), m = new THREE.Matrix4(), h = FH - 0.45
-    keep.forEach((p, i) => { m.compose(new THREE.Vector3(p[0], f * FH + 0.4 + h / 2, p[1]), new THREE.Quaternion(), new THREE.Vector3(1, h, 1)); im.setMatrixAt(i, m) })
-    im.castShadow = true; g.add(im)
-    const gm = new THREE.MeshPhysicalMaterial({ color: 0xb79ccb, metalness: 0.2, roughness: 0.05, transparent: true, opacity: 0.55, envMapIntensity: 1.6, clearcoat: 1 }); glassMats.push(gm)
-    const gg = pod ? new THREE.ExtrudeGeometry(ps, { depth: FH - 0.45, bevelEnabled: false }) : new THREE.BoxGeometry(f < FM ? 21.8 : 14.8, FH - 0.45, f < FM ? 17.8 : 13.8)
-    if (pod) gg.rotateX(-Math.PI / 2)
-    const gl = new THREE.Mesh(gg, gm)
-    if (pod) { gl.scale.set(0.985, 1, 0.985); gl.position.set(0.03, f * FH + 0.4, -0.015) } else gl.position.set(f < FM ? -5 : -1.5, f * FH + 0.4 + (FH - 0.45) / 2, -5)
-    g.add(gl); groups.push(g); scene.add(g)
+  }
+  // purple towers: dark glass panes, none lit
+  const towerWindows = (g: Element, x: number, y: number, w: number, d: number, z: number, fh: number) => {
+    const n = 7, z0 = z + 1, z1 = z + fh - 0.9, a = (w - 3) / n, b = (d - 3) / n
+    for (let i = 0; i < n; i++) {
+      const yy = y + 1.5 + i * b, xx = x + 1.5 + i * a
+      el('polygon', { points: pts([P(x + w, yy, z0), P(x + w, yy + b - 1.2, z0), P(x + w, yy + b - 1.2, z1), P(x + w, yy, z1)]), fill: '#4d3363' }, g)
+      el('polygon', { points: pts([P(xx, y + d, z0), P(xx + a - 1.2, y + d, z0), P(xx + a - 1.2, y + d, z1), P(xx, y + d, z1)]), fill: '#6b4c85' }, g)
+    }
   }
 
-  const meta: { f: number; k: number }[] = groups.map((_, f) => ({ f, k: 0 })) // k: 0 hero, 1 left, 2 right, 3 connectors
-
-  // ---- extra towers + low connectors, so it reads as a campus rather than a single building ----
-  const gCache = new Map<string, THREE.BufferGeometry>()
-  const boxG = (w: number, h: number, d: number, ox = 0, oy = 0, oz = 0) => {
-    const k = [w, h, d, ox, oy, oz].join()
-    if (!gCache.has(k)) { const b = new THREE.BoxGeometry(w, h, d); b.translate(ox, oy, oz); gCache.set(k, b) }
-    return gCache.get(k)!
+  // city
+  const cam = el('g', {}, svg)
+  type Item = { d: number; t?: { gx: number; gy: number; f: number; main?: number }; gx?: number; gy?: number; h?: number; w?: number }
+  const items: Item[] = []
+  const T = [{ gx: 4, gy: 4, f: 26, main: 1 }, { gx: 2, gy: 5, f: 20 }, { gx: 5, gy: 2, f: 22 }]
+  for (let gx = 0; gx < 9; gx++) for (let gy = 0; gy < 9; gy++) {
+    const t = T.find((q) => q.gx === gx && q.gy === gy)
+    if (t) { items.push({ d: gx + gy, t }); continue }
+    if (rnd() < 0.12) continue
+    items.push({ d: gx + gy, gx, gy, h: 12 + rnd() * rnd() * 80, w: 30 + rnd() * 10 })
   }
-  type Stage = { from: number; to: number; w: number; d: number; dx?: number; dz?: number }
-  const addTower = (k: number, cx: number, cz: number, stages: Stage[]) => {
-    const N = stages[stages.length - 1].to
-    for (let f = 0; f < N; f++) {
-      const st = stages.find((s) => f >= s.from && f < s.to)!
-      const x = cx + (st.dx ?? 0), z = cz + (st.dz ?? 0), w = st.w, d = st.d, g = new THREE.Group()
-      const mat = new THREE.MeshStandardMaterial({ color: 0xf4f4f4, roughness: 0.7, transparent: true }); slabMats.push(mat)
-      const slab = new THREE.Mesh(boxG(w + 0.8, 0.4, d + 0.8, x, 0.2, z), mat)
-      slab.position.y = f * FH; slab.castShadow = slab.receiveShadow = true; g.add(slab)
-      if (f === N - 1) {
-        const cap = new THREE.Mesh(boxG(w - 2, 0.9, d - 2, x, FH + 0.5, z), mat); cap.position.y = f * FH; cap.castShadow = true; g.add(cap)
-        const eq = new THREE.Mesh(boxG(w / 3, 1.8, d / 3, x + w / 6, FH + 1.9, z - d / 6), mat); eq.position.y = f * FH; eq.castShadow = true; g.add(eq)
+  items.sort((a, b) => a.d - b.d)
+  const cityG: Element[] = [], floors: Element[] = []
+  let mainXY: Pt = [0, 0]
+  items.forEach((it) => {
+    const g = el('g', {}, cam)
+    if (it.t) {
+      const x = it.t.gx * PITCH, y = it.t.gy * PITCH
+      if (it.t.main) {
+        mainXY = [x + 20, y + 20]
+        for (let i = 0; i < NF; i++) {
+          const fg = el('g', {}, g)
+          box(fg, x, y, 40, 40, FH - 0.8, 0, GLASS, 0.5)
+          towerWindows(fg, x, y, 40, 40, 0, FH - 0.8)
+          floors.push(fg)
+        }
+      } else {
+        box(g, x + 2, y + 2, 36, 36, it.t.f * FH, 0, GLASS, 0.5)
+        for (let wf = 0; wf < it.t.f; wf++) towerWindows(g, x + 2, y + 2, 36, 36, wf * FH, FH - 0.8)
+        cityG.push(g)
       }
-      const keep = rect(x - w / 2, x + w / 2, z - d / 2, z + d / 2, 0.7).filter(() => rnd() > 0.03)
-      const pm = postBase.clone(); postMats.push(pm)
-      const im = new THREE.InstancedMesh(postG, pm, keep.length), m = new THREE.Matrix4(), h = FH - 0.45
-      keep.forEach((p, i) => { m.compose(new THREE.Vector3(p[0], f * FH + 0.4 + h / 2, p[1]), new THREE.Quaternion(), new THREE.Vector3(1, h, 1)); im.setMatrixAt(i, m) })
-      im.castShadow = true; g.add(im)
-      const gm = new THREE.MeshPhysicalMaterial({ color: 0xb79ccb, metalness: 0.2, roughness: 0.05, transparent: true, opacity: 0.55, envMapIntensity: 1.6, clearcoat: 1 }); glassMats.push(gm)
-      const gl = new THREE.Mesh(boxG(w - 0.2, FH - 0.45, d - 0.2, x, 0.4 + (FH - 0.45) / 2, z), gm); gl.position.y = f * FH; g.add(gl)
-      groups.push(g); meta.push({ f, k }); scene.add(g)
+    } else {
+      const x2 = it.gx! * PITCH + (PITCH - it.w!) / 2, y2 = it.gy! * PITCH + (PITCH - it.w!) / 2
+      box(g, x2, y2, it.w!, it.w!, it.h!, 0, GREY)
+      greyWindows(g, x2, y2, it.w!, it.w!, it.h!)
+      cityG.push(g)
     }
+  })
+  const ctr = P(mainXY[0], mainXY[1], 0), cc = P(225, 225, 0)
+
+  // facade labels
+  const labEls = LABELS.map((n, i) => {
+    const d = document.createElement('div'); d.className = 'tw-lab' + (i % 2 ? ' tw-l' : '')
+    d.innerHTML = `<i></i><span>${n}</span>`; host.appendChild(d); return d
+  })
+
+  // floor plan overlay
+  const planEl = document.createElement('div'); planEl.className = 'tw-plan'
+  planEl.innerHTML = `<svg viewBox="0 0 560 560" role="img" aria-label="Floor plan"><polygon points="60,30 500,30 530,60 530,500 500,530 60,530 30,500 30,60" fill="var(--tw-panel)" stroke="var(--tw-ink)" stroke-width="3"/><g class="tw-rooms"></g></svg><ul class="tw-legend"></ul>`
+  host.appendChild(planEl)
+  const psvg = planEl.querySelector('svg') as SVGSVGElement
+  const rg = planEl.querySelector('.tw-rooms') as SVGGElement
+  const lg = planEl.querySelector('.tw-legend') as HTMLElement
+  const seen: Record<string, number> = {}
+  ROOMS.forEach((r) => {
+    const g = el('g', { class: 'tw-room' }, rg)
+    el('rect', { x: r[0] + 3, y: r[1] + 3, width: r[2] - 6, height: r[3] - 6, rx: 4, fill: r[5], stroke: 'var(--tw-ink)', 'stroke-width': 1.5 }, g)
+    el('text', { x: r[0] + r[2] / 2, y: r[1] + r[3] / 2 + 4 }, g).textContent = r[2] < 100 ? r[4].split(' ')[0] : r[4]
+    if (!seen[r[4]]) { seen[r[4]] = 1; const li = document.createElement('li'); li.innerHTML = `<b style="background:${r[5]}"></b>${r[4]}`; lg.appendChild(li) }
+  })
+  const rooms = Array.from(rg.children) as SVGElement[]
+  const roomText = (i: number) => rooms[i].querySelector('text') as SVGElement
+
+  // overlays that live inside the zoomable plan
+  const ig = el('g', {}, psvg), desks = el('g', {}, ig)
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 6; c++) el('rect', { x: 60 + c * 36, y: 80 + r * 32, width: 24, height: 14, rx: 2, fill: 'var(--tw-bg)', stroke: 'var(--tw-line)', 'stroke-width': 1 }, desks)
+  const dot = (g: Element, x: number, y: number, c: string) => el('circle', { cx: x, cy: y, r: 6, fill: c, stroke: '#fff', 'stroke-width': 1.5 }, g)
+  const tag = (g: Element, bx: number, by: number, w: number, l1: string, l2: string, mx: number, my: number) => {
+    if (by > my + 10) el('line', { x1: mx, y1: my, x2: mx, y2: by, stroke: BAD, 'stroke-width': 1 }, g)
+    el('rect', { x: bx, y: by, width: w, height: 22, rx: 3, fill: 'var(--tw-panel)', stroke: BAD, 'stroke-width': 1.2 }, g)
+    el('text', { x: bx + 5, y: by + 9, 'font-size': 7, 'font-weight': 600, fill: 'var(--tw-ink)' }, g).textContent = l1
+    el('text', { x: bx + 5, y: by + 18, 'font-size': 7, 'font-weight': 700, fill: BAD }, g).textContent = l2
   }
-  addTower(1, -52, -22, [{ from: 0, to: 24, w: 14, d: 14 }, { from: 24, to: 31, w: 10, d: 10 }]) // tall tower, left
-  addTower(2, 38, -10, [{ from: 0, to: 19, w: 15, d: 15 }, { from: 19, to: 25, w: 10, d: 11, dx: 1 }]) // setback tower, right
-  addTower(3, -31, -14, [{ from: 0, to: 4, w: 30, d: 10 }]) // low connector, left
-  addTower(3, 26, -8, [{ from: 0, to: 3, w: 11, d: 10 }]) // low connector, right
-
-  // grey context massing around the campus (fades out in the section view)
-  const ctx = new THREE.Group()
-  const cMat = new THREE.MeshStandardMaterial({ color: 0xe9eaee, roughness: 0.9, transparent: true })
-  const eMat = new THREE.LineBasicMaterial({ color: 0xb4b6be, transparent: true })
-  for (let gx = -112; gx < 100; gx += 15) for (let gz = -75; gz < 62; gz += 15) {
-    const px = gx + 7.5, pz = gz + 7.5
-    if (px > -68 && px < 53 && pz > -37 && pz < 22) continue // keep the campus clear
-    if (rnd() < 0.22) continue
-    const w = 8 + rnd() * 5, d = 8 + rnd() * 5, h = 5 + rnd() * rnd() * 45
-    const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), cMat)
-    b.position.set(px + (rnd() - 0.5) * 2, h / 2, pz + (rnd() - 0.5) * 2); b.castShadow = b.receiveShadow = true; ctx.add(b)
-    const e = new THREE.LineSegments(new THREE.EdgesGeometry(b.geometry), eMat); e.position.copy(b.position); ctx.add(e)
+  const issue = (g: Element, d: Issue) => {
+    if (d.bad && d.box) tag(g, d.box[0], d.box[1], d.box[2], d.l1, d.l2 || '', d.x, d.y)
+    else el('text', { x: d.x + 10, y: d.y + 3, 'font-size': 7, 'font-weight': 600, fill: OK }, g).textContent = d.l1
+    dot(g, d.x, d.y, d.bad ? BAD : OK)
   }
-  scene.add(ctx)
+  const WG = WORKSPACE_ISSUES.map((d) => { const g = el('g', {}, ig); issue(g, d); return g })
+  const LG = el('g', {}, ig), MG = el('g', {}, ig)
+  el('rect', { x: 218, y: 212, width: 22, height: 38, rx: 2, fill: 'var(--tw-bg)', stroke: 'var(--tw-line)' }, LG)
+  el('rect', { x: 244, y: 212, width: 22, height: 38, rx: 2, fill: 'var(--tw-bg)', stroke: 'var(--tw-line)' }, LG)
+  tag(LG, LIFT_ISSUE.box![0], LIFT_ISSUE.box![1], LIFT_ISSUE.box![2], LIFT_ISSUE.l1, LIFT_ISSUE.l2!, LIFT_ISSUE.x, LIFT_ISSUE.y)
+  dot(LG, LIFT_ISSUE.x, LIFT_ISSUE.y, BAD); dot(LG, LIFT_OK.x, LIFT_OK.y, OK)
+  el('text', { x: 216, y: 263, 'font-size': 7, 'font-weight': 600, fill: OK }, LG).textContent = LIFT_OK.label
+  ;[327, 402, 480].forEach((cx) => {
+    el('rect', { x: cx - 16, y: 66, width: 32, height: 28, rx: 3, fill: 'var(--tw-bg)', stroke: 'var(--tw-line)' }, MG)
+    ;[[cx, 60], [cx, 100], [cx - 22, 80], [cx + 22, 80]].forEach((q) => el('circle', { cx: q[0], cy: q[1], r: 3.5, fill: 'var(--tw-line)' }, MG))
+  })
+  tag(MG, MEETING_ISSUE.box![0], MEETING_ISSUE.box![1], MEETING_ISSUE.box![2], MEETING_ISSUE.l1, MEETING_ISSUE.l2!, MEETING_ISSUE.x, MEETING_ISSUE.y)
+  dot(MG, MEETING_ISSUE.x, MEETING_ISSUE.y, BAD)
 
-  // common-area floor: several named spaces, then the AC unit
-  const planMats: [THREE.Material, number][] = [], plan = new THREE.Group(), PY = SEL * FH + 0.6
-  const xs = [-15, -8.5, -2, 5], zs = [-13, -6, 3]
-  const SPACES = ['Lobby', 'Reception', 'Waiting', 'Corridor', 'Lounge', 'Pantry']
-  const spaceLabel = (name: string) => {
-    const c = document.createElement('canvas'); c.width = 512; c.height = 160
-    const g = c.getContext('2d')!
-    g.font = '600 72px "Segoe UI", sans-serif'
-    const tw = Math.min(460, g.measureText(name).width + 72), x = (512 - tw) / 2
-    g.fillStyle = 'rgba(255,255,255,0.94)'
-    g.beginPath(); g.roundRect(x, 28, tw, 104, 28); g.fill()
-    g.fillStyle = '#5d1f72'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(name, 256, 80)
-    const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace
-    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0, depthWrite: false })
-    const sp = new THREE.Sprite(mat); sp.scale.set(4.2, 1.3, 1)
-    return { sp, mat }
-  }
-  for (let r = 0; r < 2; r++) for (let c = 0; c < 3; c++) {
-    const x0 = xs[c], x1 = xs[c + 1], z0 = zs[r], z1 = zs[r + 1]
-    const fm = new THREE.MeshBasicMaterial({ color: (r + c) % 2 ? 0xf6eef9 : 0xe6d4f2, transparent: true, opacity: 0, depthWrite: false })
-    const fl = new THREE.Mesh(new THREE.PlaneGeometry(x1 - x0 - 0.35, z1 - z0 - 0.35), fm)
-    fl.rotation.x = -Math.PI / 2; fl.position.set((x0 + x1) / 2, PY, (z0 + z1) / 2); plan.add(fl)
-    const lm = new THREE.LineBasicMaterial({ color: PURPLE, transparent: true, opacity: 0 })
-    plan.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints([[x0, z0], [x1, z0], [x1, z1], [x0, z1]].map((q) => new THREE.Vector3(q[0], PY + 0.05, q[1]))), lm))
-    const { sp, mat } = spaceLabel(SPACES[r * 3 + c])
-    sp.position.set((x0 + x1) / 2, PY + 1.5, (z0 + z1) / 2); plan.add(sp)
-    planMats.push([fm, 0.9], [lm, 1], [mat, 1])
-  }
-  const assetMats: [THREE.Material, number][] = []
-  const assetFloors = new Set(ASSETS.map((a) => a.floor))
-  const solid = () => new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4, transparent: true, opacity: 0 })
-  const dark = () => new THREE.MeshBasicMaterial({ color: 0x3a3f4b, transparent: true, opacity: 0 })
-  const place = (group: THREE.Group, index: number) => {
-    const a = ASSETS[index]
-    group.position.set(a.x, a.floor * FH + a.y, a.z)
-    groups[a.floor].add(group)
-  }
-  {
-    const bodyM = solid(), grilM = dark()
-    const ac = new THREE.Group()
-    ac.add(new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.2, 3.2), bodyM))
-    const gr = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.5, 2.6), grilM); gr.position.set(0.83, -0.1, 0); ac.add(gr)
-    place(ac, 0); assetMats.push([bodyM, 1], [grilM, 1])
-  }
-  {
-    const cabM = solid(), doorM = dark()
-    const lift = new THREE.Group()
-    lift.add(new THREE.Mesh(new THREE.BoxGeometry(2.2, 2.8, 2.2), cabM))
-    const door = new THREE.Mesh(new THREE.BoxGeometry(1.2, 2.2, 0.06), doorM); door.position.set(0, -0.1, 1.12); lift.add(door)
-    place(lift, 1); assetMats.push([cabM, 1], [doorM, 1])
-  }
-  {
-    const panelM = solid(), faceM = dark()
-    const panel = new THREE.Group()
-    panel.add(new THREE.Mesh(new THREE.BoxGeometry(0.4, 2.2, 1.5), panelM))
-    const face = new THREE.Mesh(new THREE.BoxGeometry(0.05, 1.6, 1.1), faceM); face.position.x = 0.22; panel.add(face)
-    place(panel, 2); assetMats.push([panelM, 1], [faceM, 1])
-  }
-  groups[SEL].add(plan)
+  const ftag = document.createElement('div'); ftag.className = 'tw-tag'; ftag.textContent = PLAN_TAGS.plan; host.appendChild(ftag)
 
-  const cW = new THREE.Color(0xf4f4f4), cC = new THREE.Color(PURPLE), cL = new THREE.Color(LILAC), pW = new THREE.Color(PURPLE)
-  const rise = groups.map(() => ({ v: 0 })) // animated on load (stagger)
-  const v3 = new THREE.Vector3()
-
-  function update(p: number, scroll = p) {
-    const wire = S(0.36, 0.5, p)
-    const exp = S(0.44, 0.62, p) * (1 - S(0.985, 1, p))
-    const sec = S(0.72, 0.78, p) * (1 - S(0.985, 1, p))
-    const gone = S(0.6, 0.68, p) * (1 - S(0.985, 1, p)) // other towers + context fade out
-    const showingAssets = p >= 0.84
-    const dm = meta.map((q) => {
-      if (q.k > 0) return 1 - gone
-      if (showingAssets && assetFloors.has(q.f)) return 1
-      return q.f === SEL ? 1 : q.f > SEL ? 1 - S(0, 0.3, sec) : q.f < SEL - 2 ? 1 - sec : 1 - 0.85 * sec
-    })
-    slabMats.forEach((m, i) => { m.wireframe = wire > 0.5; m.color.copy(cW).lerp(i % 2 ? cL : cC, wire); m.opacity = rise[i].v * dm[i] })
-    postMats.forEach((m, i) => { m.opacity = rise[i].v * (1 - 0.5 * wire) * dm[i]; m.color.copy(pW).lerp(i % 2 ? cL : cC, wire) })
-    glassMats.forEach((m, i) => { m.opacity = rise[i].v * 0.55 * (1 - wire); m.visible = wire < 0.98 })
-    groups.forEach((g, i) => { g.position.y = (1 - rise[i].v) * -26 + meta[i].f * exp * SPLIT; g.visible = rise[i].v > 0.01 && dm[i] > 0.01 })
-    const co = rise[0].v * (1 - gone); cMat.opacity = co; eMat.opacity = co; ctx.visible = co > 0.01
-    planMats.forEach(([m, o]) => { m.opacity = o * sec })
-    const assetK = S(0.84, 0.87, p) * (1 - S(0.985, 1, p))
-    assetMats.forEach(([m, o]) => { m.opacity = o * assetK })
-
-    // camera: campus orbit -> facade -> floor -> each critical asset -> back out
-    const h = FH + SPLIT * exp, fy = SEL * h + 0.6
-    const wy = (asset: (typeof ASSETS)[number]) => asset.floor * h + asset.y
-    const span = (0.98 - 0.86) / ASSETS.length
-    const shots = ASSETS.map((asset, i) => ({ t: 0.86 + (i + 0.5) * span, asset }))
-    const last = shots[shots.length - 1]
-    const a = 0.6 + S(0, 0.5, p) * 1.1 + p * 0.15
-    const R = KF(p, [[0, 200], [0.44, 200], [0.62, 235], [0.64, 235], [0.7, 150], [0.73, 150], [0.82, 105], [0.85, 105], ...shots.map(({ t }) => [t, 34]), [0.985, 34], [1, 215]])
-    const dy = KF(p, [[0, 56], [0.44, 56], [0.62, 49], [0.64, 49], [0.7, 30], [0.73, 30], [0.82, 58], [0.85, 58], ...shots.map(({ t }) => [t, 14]), [0.985, 14], [1, 56]])
-    const ty = KF(p, [[0, 44], [0.44, 44], [0.62, 66], [0.64, 66], [0.7, 50], [0.73, 50], [0.82, fy], [0.85, fy], ...shots.map(({ t, asset }) => [t, wy(asset)]), [0.985, wy(last.asset)], [1, 44]])
-    const lx = KF(p, [[0, -8], [0.6, -8], [0.7, -5], [0.85, -5], ...shots.map(({ t, asset }) => [t, asset.x]), [0.985, last.asset.x], [1, -8]])
-    const lz = KF(p, [[0, -10], [0.6, -10], [0.7, -5], [0.85, -5], ...shots.map(({ t, asset }) => [t, asset.z]), [0.985, last.asset.z], [1, -10]])
-    cam.position.set(lx + Math.sin(a) * R, ty + dy, lz + Math.cos(a) * R)
-    cam.lookAt(lx, ty, lz)
-    cam.updateMatrixWorld()
-    rend.render(scene, cam)
-
-    const W = host.clientWidth, H = host.clientHeight, hr = host.getBoundingClientRect()
-    const proj = (x: number, y: number, z: number) => { v3.set(x, y, z).project(cam); return [(v3.x + 1) / 2 * W, (1 - v3.y) / 2 * H] }
-    const setLine = (i: number, pts: string, k: number, ax: number, ay: number) => {
-      ui.lines[i].setAttribute('points', pts); ui.lines[i].style.strokeDashoffset = String(1 - k)
-      ui.dots[i].setAttribute('cx', String(ax)); ui.dots[i].setAttribute('cy', String(ay)); ui.dots[i].style.opacity = String(k)
-    }
-
-    // 1) module labels, each tied to its own stretch of scroll
-    FAC.forEach(([f, z], i) => {
-      const [ax, ay] = proj(6.5, f * h + 1, z)
-      const t0 = 0.02 + i * 0.042
-      const k = S(t0, t0 + 0.03, scroll) * (1 - S(0.34, 0.37, scroll))
-      const s = i % 2 ? -1 : 1, ex = ax + s * 46, ey = ay - 14
-      const el = ui.labels[i]
-      el.style.opacity = String(k)
-      el.style.transform = `translate(${ex + s * 4}px,${ey}px) translate(${s < 0 ? '-100%' : '0'},-50%)`
-      setLine(i, `${ax},${ay} ${ax + s * 22},${ey} ${ex},${ey}`, k, ax, ay)
-    })
-
-    // 2) floor tag
-    {
-      const [ax, ay] = proj(-5, fy, -13)
-      ui.floorTag.style.opacity = String(S(0.77, 0.8, p) * (1 - S(0.84, 0.86, p)))
-      ui.floorTag.style.transform = `translate(${ax}px,${ay}px) translate(-50%,-130%)`
-    }
-
-    // 3) one detail card per critical asset, advancing with scroll
-    ASSETS.forEach((asset, i) => {
-      const a0 = 0.86 + i * span, b = a0 + span
-      const k = S(a0, a0 + span * 0.28, scroll) * (1 - S(b - span * 0.16, b, scroll))
-      const [ax, ay] = proj(asset.x, wy(asset), asset.z)
-      const card = ui.cards[i]
-      card.style.opacity = String(k)
-      const cr = card.getBoundingClientRect()
-      setLine(LABELS.length + i, `${cr.left - hr.left},${cr.top - hr.top + 22} ${ax},${ay}`, k, ax, ay)
-    })
-  }
-
+  // sizing
+  let W = host.clientWidth || 1, H = host.clientHeight || 1, U = 1, TOP = 0, CY = 0
   function resize() {
-    const w = host.clientWidth, h = host.clientHeight
-    const aspect = w / h
-    // widen the vertical FOV on portrait/narrow stages so the building and labels still fit
-    cam.fov = aspect >= 1.3 ? 38 : Math.min(70, 38 * Math.pow(1.3 / aspect, 0.8))
-    rend.setSize(w, h)
-    cam.aspect = aspect
-    cam.updateProjectionMatrix()
+    W = host.clientWidth || 1; H = host.clientHeight || 1
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`)
+    TOP = Math.max(0, getTop()); CY = TOP + (H - TOP) / 2
+    U = Math.min(W / 860, (H - TOP) / 600) * (W < 700 ? 1.3 : 1)
+    host.style.setProperty('--tw-h', H - TOP + 'px')
+    planEl.style.paddingTop = TOP + 24 + 'px'; ftag.style.top = TOP + 16 + 'px'
+    host.classList.toggle('tw-wide', W >= 880)
   }
   resize()
 
-  function dispose() {
-    scene.traverse((o) => {
-      const m = o as THREE.Mesh
-      m.geometry?.dispose()
-      const mt = m.material
-      if (mt) (Array.isArray(mt) ? mt : [mt]).forEach((x) => x.dispose())
+  // p: 0..1
+  function update(p: number) {
+    const a = sm(0, 0.2, p), e = sm(0.24, 0.44, p), f = sm(0.47, 0.6, p), g = sm(0.62, 0.7, p)
+    const z = sm(0.74, 0.78, p), a2 = sm(0.86, 0.9, p), a3 = sm(0.93, 0.96, p)
+
+    // 3D-ish camera on the city
+    const gap = GAP * e, tz = (NF * (FH + gap)) / 2, fz = FOC * (FH + gap) + FH / 2
+    const t1 = lerp(cc[0], ctr[0], a), y1 = lerp(cc[1] - 30, ctr[1] - 40, a)
+    let s = lerp(1.2, 2.6, a); s = lerp(s, 1.3, e)
+    const ty1 = lerp(y1, ctr[1] - tz + 25, e)
+    s = lerp(s, 8, f)
+    const ty2 = lerp(ty1, ctr[1] - fz, f)
+    cam.setAttribute('transform', `translate(${W / 2},${CY}) scale(${s * U}) translate(${-t1},${-ty2})`)
+    cityG.forEach((c) => ((c as SVGElement).style.opacity = String(1 - 0.7 * a - 0.3 * e)))
+    floors.forEach((fl, i) => {
+      fl.setAttribute('transform', `translate(0,${(-(i * (FH + gap))).toFixed(2)})`)
+      ;(fl as SVGElement).style.opacity = String(i === FOC ? 1 : 1 - f)
     })
-    rend.dispose(); rend.domElement.remove()
+    svg.style.opacity = String(1 - g)
+    planEl.style.opacity = String(g)
+
+    // facade labels (one by one, gone before the split)
+    labEls.forEach((d, i) => {
+      const q = P(mainXY[0] + 20, mainXY[1] - 20 + ((i * 11) % 34) + 3, 0)
+      const k = sm(0.04 + i * 0.022, 0.07 + i * 0.022, p) * (1 - sm(0.19, 0.23, p))
+      const X = (q[0] - t1) * s * U + W / 2, Y = (q[1] - FACADE_FLOORS[i] * (FH + gap) - ty2) * s * U + CY
+      d.style.opacity = String(k)
+      d.style.transform = `translate(${X.toFixed(1)}px,${Y.toFixed(1)}px)`
+    })
+
+    // floor plan rooms fade in, then dim around whichever area is in focus
+    rooms.forEach((r, i) => {
+      const focus = (1 - a2) * (i === R_WORKSPACE ? 1 : 0) + a2 * (1 - a3) * (R_LIFT_CORE.includes(i) ? 1 : 0) + a3 * (R_MEETING.includes(i) ? 1 : 0)
+      r.style.opacity = String(sm(0.63 + i * 0.004, 0.68 + i * 0.004, p) * (1 - 0.65 * z * (1 - focus)))
+    })
+    ftag.style.opacity = String(sm(0.63, 0.68, p))
+    ftag.textContent = a3 > 0.5 ? PLAN_TAGS.meeting : a2 > 0.5 ? PLAN_TAGS.lift : z > 0.5 ? PLAN_TAGS.workspace : PLAN_TAGS.plan
+    lg.style.opacity = String(1 - z)
+
+    // plan camera: overview -> workspace -> lifts -> meeting rooms
+    const cx = lerp(lerp(lerp(280, 160, z), 280, a2), 405, a3)
+    const cy = lerp(lerp(lerp(280, 115, z), 235, a2), 95, a3)
+    const cs = lerp(lerp(lerp(1, 2.25, z), 3.2, a2), 2.6, a3)
+    psvg.style.transformOrigin = '50% 50%'
+    psvg.style.transform = `translateX(${z * (W > 880 ? W * 0.1 : 0)}px) scale(${cs}) translate(${-(cx - 280) / 5.6}%,${-(cy - 280) / 5.6}%)`
+    roomText(R_WORKSPACE).style.opacity = String(1 - z)
+    roomText(7).style.opacity = String(1 - a2); roomText(9).style.opacity = String(1 - a2)
+    R_MEETING.forEach((i) => (roomText(i).style.opacity = String(1 - a3)))
+
+    desks.style.opacity = String(sm(0.77, 0.8, p))
+    WG.forEach((n, i) => ((n as SVGElement).style.opacity = String(sm(0.78 + i * 0.02, 0.8 + i * 0.02, p) * (1 - 0.6 * a2))))
+    ;(LG as SVGElement).style.opacity = String(sm(0.88, 0.9, p) * (1 - 0.6 * a3))
+    ;(MG as SVGElement).style.opacity = String(sm(0.95, 0.97, p))
   }
-  return { update, resize, dispose, rise }
+
+  function dispose() {
+    style.remove(); svg.remove(); planEl.remove(); ftag.remove(); labEls.forEach((d) => d.remove())
+    host.classList.remove('tw-host', 'tw-wide')
+  }
+  return { update, resize, dispose }
 }
