@@ -206,6 +206,7 @@ export function createTower(host: HTMLElement, getTop: () => number = () => 0) {
 
   // sizing
   let W = host.clientWidth || 1, H = host.clientHeight || 1, U = 1, TOP = 0, CY = 0
+  let labelWidths = labEls.map(() => 120)
   function resize() {
     W = host.clientWidth || 1; H = host.clientHeight || 1
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`)
@@ -219,13 +220,14 @@ export function createTower(host: HTMLElement, getTop: () => number = () => 0) {
     host.style.setProperty('--tw-h', availH + 'px')
     planEl.style.paddingTop = TOP + 16 + 'px'; ftag.style.top = TOP + 12 + 'px'
     host.classList.toggle('tw-wide', W >= 880)
+    labelWidths = labEls.map((d) => d.querySelector('span')?.getBoundingClientRect().width || 120)
   }
   resize()
 
   // p: 0..1
   function update(p: number) {
-    const a = sm(0, 0.2, p), e = sm(0.24, 0.44, p), f = sm(0.47, 0.6, p), g = sm(0.62, 0.7, p)
-    const z = sm(0.74, 0.78, p), a2 = sm(0.86, 0.9, p), a3 = sm(0.93, 0.96, p)
+    const a = sm(0, 0.2, p), e = sm(0.24, 0.44, p), f = sm(0.46, 0.66, p), g = sm(0.62, 0.72, p)
+    const z = sm(0.72, 0.82, p), a2 = sm(0.84, 0.92, p), a3 = sm(0.93, 0.995, p)
 
     // 3D-ish camera on the city
     const gap = GAP * e, tz = (NF * (FH + gap)) / 2, fz = FOC * (FH + gap) + FH / 2
@@ -248,8 +250,7 @@ export function createTower(host: HTMLElement, getTop: () => number = () => 0) {
       const q = P(mainXY[0] + 20, mainXY[1] - 20 + ((i * 11) % 34) + 3, 0)
       const k = sm(0.04 + i * 0.022, 0.07 + i * 0.022, p) * (1 - sm(0.19, 0.23, p))
       const X = (q[0] - t1) * s * U + W / 2, Y = (q[1] - FACADE_FLOORS[i] * (FH + gap) - ty2) * s * U + CY
-      const span = d.querySelector('span')
-      const labelW = span?.getBoundingClientRect().width ?? 120
+      const labelW = labelWidths[i]
       const leftSide = i % 2 === 1
       const minX = leftSide ? labelW + 16 : 8
       const maxX = leftSide ? W - 8 : W - labelW - 16

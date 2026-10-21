@@ -23,16 +23,20 @@ const Hero = () => {
 
   useEffect(() => {
     const tower = createTower(stage.current!)
-    let cur = 0, raf = 0, idle: number | undefined
+    let cur = 0, raf = 0, idle: number | undefined, last = performance.now()
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    let stickyTop = Number.parseFloat(getComputedStyle(pin.current!).top) || 0
 
-    const loop = () => {
+    const loop = (now: number) => {
+      const dt = Math.min(0.05, (now - last) / 1000)
+      last = now
       const r = section.current!.getBoundingClientRect()
       const pinEl = pin.current!
-      const stickyTop = Number.parseFloat(getComputedStyle(pinEl).top) || 0
       const travel = Math.max(1, r.height - pinEl.offsetHeight - stickyTop)
       const target = Math.min(1, Math.max(0, -r.top / travel))
 
-      cur += (target - cur) * 0.12
+      if (reduce) cur = target
+      else cur += (target - cur) * (1 - Math.exp(-dt / 0.22))
       if (Math.abs(target - cur) < 0.0004) cur = target
       tower.update(cur)
 
@@ -54,7 +58,7 @@ const Hero = () => {
     ro.observe(stage.current!)
     const nav = document.querySelector('nav')
     if (nav) ro.observe(nav)
-    const onResize = () => tower.resize()
+    const onResize = () => { stickyTop = Number.parseFloat(getComputedStyle(pin.current!).top) || 0; tower.resize() }
     window.addEventListener('resize', onResize)
     return () => { cancelAnimationFrame(raf); clearTimeout(idle); ro.disconnect(); window.removeEventListener('resize', onResize); tower.dispose() }
   }, [reset])
