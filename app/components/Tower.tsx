@@ -61,12 +61,12 @@ const CSS = `
 .tw-scene{position:absolute;inset:0;width:100%;height:100%}
 .tw-lab{position:absolute;left:0;top:0;white-space:nowrap;z-index:3;pointer-events:none;opacity:0}
 .tw-lab i{position:absolute;left:-4px;top:-4px;width:8px;height:8px;border-radius:50%;background:var(--tw-accent)}
-.tw-lab span{position:absolute;top:0;left:14px;transform:translateY(-50%);background:var(--tw-panel);color:var(--tw-ink);padding:3px 8px;border-radius:4px;font-size:14px;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.tw-lab span{position:absolute;top:0;left:14px;transform:translateY(-50%);background:var(--tw-panel);color:var(--tw-ink);padding:3px 8px;border-radius:4px;font-size:clamp(11px,1.5vw,14px);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.2)}
 .tw-lab.tw-l span{left:auto;right:14px}
-.tw-tag{position:absolute;top:clamp(16px,7%,64px);left:50%;transform:translateX(-50%);background:var(--tw-accent);color:#fff;padding:6px 16px;border-radius:999px;font-weight:600;font-size:15px;opacity:0;z-index:3;white-space:nowrap;pointer-events:none}
-.tw-plan{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:clamp(16px,4%,56px);padding:24px;opacity:0;pointer-events:none;z-index:2}
-.tw-plan svg{width:min(560px,92%,calc(var(--tw-h,800px) * .8));height:auto;flex:none}
-.tw-legend{list-style:none;margin:0;padding:0;width:210px;font-size:15px;display:none;color:var(--tw-ink)}
+.tw-tag{position:absolute;top:clamp(16px,7%,64px);left:50%;transform:translateX(-50%);background:var(--tw-accent);color:#fff;padding:6px 16px;border-radius:999px;font-weight:600;font-size:clamp(12px,2vw,15px);opacity:0;z-index:3;max-width:calc(100% - 32px);white-space:normal;text-align:center;pointer-events:none}
+.tw-plan{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:clamp(12px,3%,40px);padding:16px;box-sizing:border-box;overflow:hidden;opacity:0;pointer-events:none;z-index:2}
+.tw-plan svg{width:min(560px,100%);max-height:100%;height:auto;flex:1 1 auto;min-width:0}
+.tw-legend{list-style:none;margin:0;padding:0;width:min(210px,34%);font-size:clamp(12px,1.6vw,15px);display:none;color:var(--tw-ink);flex:none}
 .tw-wide .tw-legend{display:block}
 .tw-legend li{display:flex;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--tw-line)}
 .tw-legend b{width:14px;height:14px;border-radius:3px;flex:none}
@@ -209,10 +209,15 @@ export function createTower(host: HTMLElement, getTop: () => number = () => 0) {
   function resize() {
     W = host.clientWidth || 1; H = host.clientHeight || 1
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`)
-    TOP = Math.max(0, getTop()); CY = TOP + (H - TOP) / 2
-    U = Math.min(W / 860, (H - TOP) / 600) * (W < 700 ? 1.3 : 1)
-    host.style.setProperty('--tw-h', H - TOP + 'px')
-    planEl.style.paddingTop = TOP + 24 + 'px'; ftag.style.top = TOP + 16 + 'px'
+    const nav = document.querySelector('nav')
+    const overlap = nav ? nav.getBoundingClientRect().bottom - host.getBoundingClientRect().top + 12 : getTop()
+    TOP = Math.max(0, overlap)
+    const availH = Math.max(1, H - TOP)
+    CY = TOP + availH / 2
+    // 960 x 600 is the opening city (camera scale 1.2) plus a margin, so the block stays inside the stage
+    U = Math.min(W / 960, availH / 600)
+    host.style.setProperty('--tw-h', availH + 'px')
+    planEl.style.paddingTop = TOP + 16 + 'px'; ftag.style.top = TOP + 12 + 'px'
     host.classList.toggle('tw-wide', W >= 880)
   }
   resize()
@@ -243,8 +248,15 @@ export function createTower(host: HTMLElement, getTop: () => number = () => 0) {
       const q = P(mainXY[0] + 20, mainXY[1] - 20 + ((i * 11) % 34) + 3, 0)
       const k = sm(0.04 + i * 0.022, 0.07 + i * 0.022, p) * (1 - sm(0.19, 0.23, p))
       const X = (q[0] - t1) * s * U + W / 2, Y = (q[1] - FACADE_FLOORS[i] * (FH + gap) - ty2) * s * U + CY
-      d.style.opacity = String(k)
-      d.style.transform = `translate(${X.toFixed(1)}px,${Y.toFixed(1)}px)`
+      const span = d.querySelector('span')
+      const labelW = span?.getBoundingClientRect().width ?? 120
+      const leftSide = i % 2 === 1
+      const minX = leftSide ? labelW + 16 : 8
+      const maxX = leftSide ? W - 8 : W - labelW - 16
+      const inView = W >= 520 && Y > TOP + 8 && Y < H - 8 && minX <= maxX
+      const x = Math.min(maxX, Math.max(minX, X))
+      d.style.opacity = String(inView ? k : 0)
+      d.style.transform = `translate(${x.toFixed(1)}px,${Y.toFixed(1)}px)`
     })
 
     // floor plan rooms fade in, then dim around whichever area is in focus
